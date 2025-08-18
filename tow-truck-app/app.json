@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Tow Truck",
+    "slug": "tow-truck-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "updates": {
+      "fallbackToCacheTimeout": 0
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "permissions": []
+    },
+    "web": {},
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "isAndroidForegroundServiceEnabled": true
+        }
+      ],
+      "expo-image-picker"
+    ]
+  }
+}
+
