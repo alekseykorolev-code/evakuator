@@ -50,6 +50,7 @@ function initIndexPage() {
   const orderForm = document.getElementById('orderForm');
   const distanceInput = document.getElementById('distance');
   const distanceAutoBtn = document.getElementById('distanceAutoBtn');
+  const livePriceSpan = document.getElementById('livePrice');
   const phoneInput = document.getElementById('phone');
   const nameInput = document.getElementById('name');
   const pickupInput = document.getElementById('pickup');
@@ -61,6 +62,8 @@ function initIndexPage() {
   const canWinchCheckbox = document.getElementById('canWinch');
   const commentInput = document.getElementById('comment');
   const calculatedCostSpan = document.getElementById('calculatedCost');
+  const clearMapBtn = document.getElementById('clearMapBtn');
+  const mapMessageEl = document.getElementById('mapMessage');
 
   const myOrdersForm = document.getElementById('myOrdersForm');
   const myPhoneInput = document.getElementById('myPhone');
@@ -70,6 +73,7 @@ function initIndexPage() {
     distanceAutoBtn.addEventListener('click', () => {
       const rnd = Math.floor(Math.random() * (30 - 5 + 1)) + 5; // 5..30
       distanceInput.value = rnd;
+      updateLivePrice();
     });
   }
 
@@ -110,6 +114,9 @@ function initIndexPage() {
         pickupAddress: pickupInput.value.trim(),
         dropoffAddress: dropoffInput.value.trim(),
         distanceKm: distanceKm,
+        routeMeters: window.__routeMeters || null,
+        pickupCoords: window.__pickupCoords || null,
+        dropoffCoords: window.__dropoffCoords || null,
         vehicleType: vehicleTypeSelect.value,
         brandModel: brandModelInput.value.trim(),
         isRunning: !!isRunningCheckbox.checked,
@@ -126,6 +133,7 @@ function initIndexPage() {
       saveOrders(orders);
 
       // Email emulation
+      // ЗАМЕНИТЬ НА РЕАЛЬНУЮ ОТПРАВКУ ПИСЕМ В ПРОДЕ (например, EmailJS)
       console.log(`Письмо отправлено на vk_rot@mail.ru с данными:`, order);
 
       // Show cost modal
@@ -150,7 +158,18 @@ function initIndexPage() {
 
       // Refresh my orders if visible
       renderMyOrders();
+      if (mapMessageEl) mapMessageEl.textContent = 'Заказ отправлен. Маршрут можно построить заново для новой заявки.';
     });
+  }
+
+  function updateLivePrice() {
+    if (!livePriceSpan) return;
+    const km = Number(distanceInput.value) || 0;
+    livePriceSpan.textContent = computeCost(km).toString();
+  }
+  if (distanceInput) {
+    ['input','change'].forEach(evt => distanceInput.addEventListener(evt, updateLivePrice));
+    updateLivePrice();
   }
 
   function renderMyOrders() {
@@ -271,6 +290,9 @@ function initIndexPage() {
   if (myPhoneInput && myPhoneInput.value) {
     renderMyOrders();
   }
+
+  // Map init (Yandex Maps)
+  initYandexMap({ pickupInput, dropoffInput, distanceInput, onDistanceChange: updateLivePrice, clearMapBtn, mapMessageEl });
 }
 
 // Admin page logic
@@ -341,6 +363,7 @@ function initAdminPage() {
           <div class="small">Доставка: ${escapeHtml(o.dropoffAddress)}</div>
           <div class="small opacity-75">${o.distanceKm} км</div>
         </td>
+        <td>${o.distanceKm ?? '-'}</td>
         <td>${escapeHtml(o.vehicleType)}</td>
         <td>${escapeHtml(o.brandModel || '-')}</td>
         <td>${escapeHtml(o.comment || '-')}</td>
@@ -433,4 +456,201 @@ document.addEventListener('DOMContentLoaded', () => {
   if (page === 'index') initIndexPage();
   if (page === 'admin') initAdminPage();
 });
+
+// Yandex Maps integration
+// API KEY PLACEHOLDER: ЗАМЕНИТЬ НА РЕАЛЬНЫЙ КЛЮЧ ПЕРЕД ЗАПУСКОМ
+function initYandexMap({ pickupInput, dropoffInput, distanceInput, onDistanceChange, clearMapBtn, mapMessageEl }) {
+  const mapEl = document.getElementById('map');
+  const loaderEl = document.getElementById('mapLoader');
+  if (!mapEl || !window.ymaps) {
+    // Fallback if API failed to load
+    if (mapMessageEl) mapMessageEl.textContent = 'Карта недоступна. Введите адреса вручную.';
+    return;
+  }
+
+  loaderEl?.classList.remove('d-none');
+
+  ymaps.ready(() => {
+    let map = new ymaps.Map('map', {
+      center: [59.9386, 30.3141], // СПб
+      zoom: 10,
+      controls: ['zoomControl', 'geolocationControl']
+    }, {
+      suppressMapOpenBlock: true
+    });
+
+    let pickupPlacemark = null;
+    let dropoffPlacemark = null;
+    let route = null;
+
+    function createPlacemark(coords, isPickup) {
+      const color = '#1E3A8A'; // brand blue
+      const caption = isPickup ? '📍 Забрать здесь' : '📍 Доставить сюда';
+      return new ymaps.Placemark(coords, {
+        iconCaption: caption
+      }, {
+        preset: 'islands#blueCircleDotIcon',
+        iconColor: color,
+        draggable: true
+      });
+    }
+
+    function setAddressFromCoords(coords, isPickup) {
+      ymaps.geocode(coords).then((res) => {
+        const first = res.geoObjects.get(0);
+        const address = first ? first.getAddressLine() : '';
+        if (isPickup && pickupInput) pickupInput.value = address;
+        if (!isPickup && dropoffInput) dropoffInput.value = address;
+      }).catch(() => {
+        if (mapMessageEl) mapMessageEl.textContent = 'Не удалось определить адрес по координатам.';
+      });
+    }
+
+    function geocodeAddressToCoords(address) {
+      return ymaps.geocode(address).then((res) => {
+        const first = res.geoObjects.get(0);
+        if (!first) throw new Error('not found');
+        return first.geometry.getCoordinates();
+      });
+    }
+
+    function updateRoute() {
+      if (route) {
+        map.geoObjects.remove(route);
+        route = null;
+      }
+
+      if (!pickupPlacemark || !dropoffPlacemark) {
+        window.__routeMeters = null;
+        window.__pickupCoords = pickupPlacemark ? pickupPlacemark.geometry.getCoordinates() : null;
+        window.__dropoffCoords = dropoffPlacemark ? dropoffPlacemark.geometry.getCoordinates() : null;
+        return;
+      }
+
+      const start = pickupPlacemark.geometry.getCoordinates();
+      const end = dropoffPlacemark.geometry.getCoordinates();
+
+      ymaps.route([start, end], { mapStateAutoApply: true }).then((builtRoute) => {
+        route = builtRoute;
+        route.getPaths().options.set({
+          strokeColor: '#F97316', // orange
+          strokeWidth: 5,
+          opacity: 0.9
+        });
+        map.geoObjects.add(route);
+
+        const distanceMeters = route.getLength();
+        const km = Math.max(1, Math.round(distanceMeters / 1000));
+        if (distanceInput) distanceInput.value = String(km);
+        window.__routeMeters = distanceMeters;
+        window.__pickupCoords = start;
+        window.__dropoffCoords = end;
+        onDistanceChange?.();
+
+        if (mapMessageEl) mapMessageEl.textContent = `Расстояние по маршруту: ${km} км`;
+      }).catch((err) => {
+        console.error('Route build error', err);
+        if (mapMessageEl) mapMessageEl.textContent = 'Не удалось построить маршрут — введите адрес вручную.';
+      });
+    }
+
+    function ensureBothMarkers() {
+      if (pickupPlacemark && dropoffPlacemark) updateRoute();
+    }
+
+    map.events.add('click', (e) => {
+      const coords = e.get('coords');
+      if (!pickupPlacemark) {
+        pickupPlacemark = createPlacemark(coords, true);
+        map.geoObjects.add(pickupPlacemark);
+        setAddressFromCoords(coords, true);
+        pickupPlacemark.events.add('dragend', () => {
+          const c = pickupPlacemark.geometry.getCoordinates();
+          setAddressFromCoords(c, true);
+          ensureBothMarkers();
+        });
+      } else if (!dropoffPlacemark) {
+        dropoffPlacemark = createPlacemark(coords, false);
+        map.geoObjects.add(dropoffPlacemark);
+        setAddressFromCoords(coords, false);
+        dropoffPlacemark.events.add('dragend', () => {
+          const c = dropoffPlacemark.geometry.getCoordinates();
+          setAddressFromCoords(c, false);
+          ensureBothMarkers();
+        });
+      } else {
+        // If both exist, reset second point to new click
+        dropoffPlacemark.geometry.setCoordinates(coords);
+        setAddressFromCoords(coords, false);
+      }
+      ensureBothMarkers();
+    });
+
+    function handleAddressInput(inputEl, isPickup) {
+      if (!inputEl) return;
+      let timer = null;
+      inputEl.addEventListener('input', () => {
+        clearTimeout(timer);
+        const value = inputEl.value.trim();
+        if (!value) return;
+        timer = setTimeout(() => {
+          geocodeAddressToCoords(value).then((coords) => {
+            map.setCenter(coords, 13, { duration: 200 });
+            if (isPickup) {
+              if (!pickupPlacemark) {
+                pickupPlacemark = createPlacemark(coords, true);
+                map.geoObjects.add(pickupPlacemark);
+                pickupPlacemark.events.add('dragend', () => {
+                  const c = pickupPlacemark.geometry.getCoordinates();
+                  setAddressFromCoords(c, true);
+                  ensureBothMarkers();
+                });
+              } else {
+                pickupPlacemark.geometry.setCoordinates(coords);
+              }
+            } else {
+              if (!dropoffPlacemark) {
+                dropoffPlacemark = createPlacemark(coords, false);
+                map.geoObjects.add(dropoffPlacemark);
+                dropoffPlacemark.events.add('dragend', () => {
+                  const c = dropoffPlacemark.geometry.getCoordinates();
+                  setAddressFromCoords(c, false);
+                  ensureBothMarkers();
+                });
+              } else {
+                dropoffPlacemark.geometry.setCoordinates(coords);
+              }
+            }
+            ensureBothMarkers();
+          }).catch(() => {
+            if (mapMessageEl) mapMessageEl.textContent = 'Адрес не найден. Уточните и попробуйте снова.';
+          });
+        }, 600);
+      });
+    }
+
+    handleAddressInput(pickupInput, true);
+    handleAddressInput(dropoffInput, false);
+
+    if (clearMapBtn) {
+      clearMapBtn.addEventListener('click', () => {
+        if (pickupPlacemark) map.geoObjects.remove(pickupPlacemark);
+        if (dropoffPlacemark) map.geoObjects.remove(dropoffPlacemark);
+        if (route) map.geoObjects.remove(route);
+        pickupPlacemark = null;
+        dropoffPlacemark = null;
+        route = null;
+        window.__routeMeters = null;
+        window.__pickupCoords = null;
+        window.__dropoffCoords = null;
+        if (distanceInput) distanceInput.value = '';
+        onDistanceChange?.();
+        mapMessageEl && (mapMessageEl.textContent = 'Карта очищена. Выберите новые точки.');
+      });
+    }
+
+    loaderEl?.classList.add('d-none');
+    if (mapMessageEl) mapMessageEl.textContent = 'Кликните по карте, чтобы выбрать точки маршрута.';
+  });
+}
 
